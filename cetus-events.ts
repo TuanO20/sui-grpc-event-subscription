@@ -1,17 +1,22 @@
 import * as grpc from '@grpc/grpc-js';
 import * as protoLoader from '@grpc/proto-loader';
 import * as path from 'path';
+import dotenv from 'dotenv';
 
-// Configuration
-const PROTO_PATH = path.join(__dirname, 'protos/sui/rpc/v2/subscription_service.proto');
+dotenv.config();
+
 
 // Quicknode endpoints consist of two crucial components: the endpoint name and the corresponding token
 // For eg: QN Endpoint: https://docs-demo.sui-mainnet.quiknode.pro/abcde123456789
 // endpoint will be: docs-demo.sui-mainnet.quiknode.pro:9000  {9000 is the port number for Sui gRPC}
 // token will be : abcde123456789
+const ENDPOINT : string = process.env.ENDPOINT || "";
+const TOKEN : string = process.env.TOKEN || "";
 
-const endpoint = 'attentive-maximum-sheet.sui-mainnet.quiknode.pro:9000';
-const token = '72f3205ea10d3926696fd015911fcdeb21812312';
+// Configuration
+const PROTO_PATH = path.join(__dirname, 'protos/sui/rpc/v2/subscription_service.proto');
+
+
 
 // The Cetus Swap Event type we want to filter for
 const CETUS_SWAP_EVENT_TYPE = '0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::SwapEvent';
@@ -30,11 +35,11 @@ const proto = grpc.loadPackageDefinition(packageDefinition) as any;
 const SubscriptionService = proto.sui.rpc.v2.SubscriptionService;
 
 // Create secure client
-const client = new SubscriptionService(endpoint, grpc.credentials.createSsl());
+const client = new SubscriptionService(ENDPOINT, grpc.credentials.createSsl());
 
 // Add token metadata
 const metadata = new grpc.Metadata();
-metadata.add('x-token', token);
+metadata.add('x-token', TOKEN);
 
 // Request payload - we need to request transactions and their events
 // Note: Paths are relative to Checkpoint message (nested inside response)

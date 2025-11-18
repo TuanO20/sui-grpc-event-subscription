@@ -5,7 +5,8 @@
   "license": "MIT",
   "dependencies": {
     "@grpc/grpc-js": "^1.14.1",
-    "@grpc/proto-loader": "^0.8.0"
+    "@grpc/proto-loader": "^0.8.0",
+    "dotenv": "^17.2.3"
   },
   "devDependencies": {
     "tsx": "^4.20.6"
