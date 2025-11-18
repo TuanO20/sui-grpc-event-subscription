@@ -18,8 +18,8 @@ const PROTO_PATH = path.join(__dirname, 'protos/sui/rpc/v2/subscription_service.
 
 
 
-// The Cetus Swap Event type we want to filter for
-const CETUS_SWAP_EVENT_TYPE = '0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::SwapEvent';
+// The Cetus Swap Event from Aggregator mode
+const CETUS_SWAP_EVENT_TYPE = '0xeffc8ae61f439bb34c9b905ff8f29ec56873dcedf81c7123ff2f1f67c45ec302::cetus::CetusSwapEvent';
 
 // Load protobuf definitions
 const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
@@ -68,6 +68,7 @@ const uniqueEventTypes = new Set<string>();
 
 call.on('data', (response: any) => {
   checkpointCount++;
+
   const checkpoint = response.checkpoint;
 
   if (!checkpoint) {
@@ -79,6 +80,8 @@ call.on('data', (response: any) => {
     console.log(`[DEBUG] Checkpoint ${checkpoint.sequence_number}: No transactions`);
     return;
   }
+  //console.log(checkpoint.transactions);
+  console.log("Number of txs in checkpoint: ", checkpoint.transactions.length);
 
   // Process each transaction in the checkpoint
   for (const tx of checkpoint.transactions) {
@@ -105,17 +108,61 @@ call.on('data', (response: any) => {
     for (const event of cetusSwapEvents) {
       eventCount++;
 
-      // Parse BCS data to extract pool address
+      // Parse BCS data to extract pool address and token addresses
       let poolAddress = 'N/A';
+      let tokenA = 'N/A';
+      let tokenB = 'N/A';
+      let atob : boolean = false;
+      let amount_in : string = '';
+      let amount_out : string = '';
 
       if (event.contents && event.contents.value) {
         try {
           const buffer = Buffer.from(event.contents.value);
 
-          // Extract pool address (first 32 bytes after the initial byte)
-          if (buffer.length >= 33) {
-            poolAddress = '0x' + buffer.subarray(1, 33).toString('hex');
+          // Debug: Log the full buffer to understand the structure
+          console.log(`[DEBUG] BCS Buffer length: ${buffer.length} bytes`);
+          console.log(`[DEBUG] Full buffer (hex): ${buffer.toString('hex')}`);
+
+          // Minimum buffer length check for fixed fields
+          if (buffer.length >= 82) {
+            // Bytes 0-32: pool (ID - 32 bytes)
+            poolAddress = '0x' + buffer.subarray(0, 32).toString('hex');
+
+            // Bytes 32-40: amount_in (u64 - 8 bytes)
+            // Bytes 40-48: amount_out (u64 - 8 bytes)
+            amount_in = buffer.readBigUInt64LE(32).toString();
+            amount_out = buffer.readBigUInt64LE(40).toString();
+
+            // Byte 48: a2b (bool - 1 byte)
+            atob = buffer.readUInt8(48) === 1;
+
+            // Bytes 49-82: by_amount_in (bool) + partner_id (ID) - skip these fields
+
+            // Bytes 82+: coin_a (TypeName - variable length, BCS encoded string)
+            // Bytes after coin_a: coin_b (TypeName - variable length, BCS encoded string)
+            // TypeName in BCS: length (ULEB128) + UTF8 bytes
+            let offset = 82;
+
+            // Read coin_a TypeName
+            const coinALength = buffer.readUInt8(offset);
+            offset += 1;
+            if (buffer.length >= offset + coinALength) {
+              tokenA = buffer.subarray(offset, offset + coinALength).toString('utf8');
+              offset += coinALength;
+
+              // Read coin_b TypeName
+              if (buffer.length > offset) {
+                const coinBLength = buffer.readUInt8(offset);
+                offset += 1;
+                if (buffer.length >= offset + coinBLength) {
+                  tokenB = buffer.subarray(offset, offset + coinBLength).toString('utf8');
+                }
+              }
+            }
           }
+
+
         } catch (e) {
           console.error('Error parsing BCS:', e);
         }
@@ -133,6 +180,11 @@ call.on('data', (response: any) => {
       console.log(`Sender:            ${event.sender}`);
       console.log(`Event Type:        ${event.event_type}`);
       console.log(`Pool Address:      ${poolAddress}`);
+      console.log(`Token A:           ${tokenA}`);
+      console.log(`Token B:           ${tokenB}`);
+      console.log(`Swap A to B:       ${atob}`);
+      console.log(`Amount in:         ${amount_in}`);
+      console.log(`Amount out:        ${amount_out}`);
       console.log('='.repeat(80));
     }
   }
@@ -164,13 +216,13 @@ process.on('SIGINT', () => {
   console.log(`Transactions processed: ${transactionCount}`);
   console.log(`Total events seen: ${totalEventsCount}`);
   console.log(`Cetus Swap Events found: ${eventCount}`);
-  console.log(`\nUnique event types seen (${uniqueEventTypes.size}):`);
-  Array.from(uniqueEventTypes)
-    .sort()
-    .forEach((type) => {
-      const isCetus = type.includes('pool::SwapEvent') || type.includes('cetus');
-      console.log(`${isCetus ? '  👉 ' : '     '}${type}`);
-    });
+  // console.log(`\nUnique event types seen (${uniqueEventTypes.size}):`);
+  // Array.from(uniqueEventTypes)
+  //   .sort()
+  //   .forEach((type) => {
+  //     const isCetus = type.includes('pool::SwapEvent') || type.includes('cetus');
+  //     console.log(`${isCetus ? '  👉 ' : '     '}${type}`);
+  //   });
   call.cancel();
   process.exit(0);
 });
