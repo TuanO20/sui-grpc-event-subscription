@@ -10,8 +10,8 @@ dotenv.config();
 // For eg: QN Endpoint: https://docs-demo.sui-mainnet.quiknode.pro/abcde123456789
 // endpoint will be: docs-demo.sui-mainnet.quiknode.pro:9000  {9000 is the port number for Sui gRPC}
 // token will be : abcde123456789
-const ENDPOINT : string = process.env.ENDPOINT || "";
-const TOKEN : string = process.env.TOKEN || "";
+const ENDPOINT: string = process.env.ENDPOINT || "";
+const TOKEN: string = process.env.TOKEN || "";
 
 // Configuration
 const PROTO_PATH = path.join(__dirname, 'protos/sui/rpc/v2/subscription_service.proto');
@@ -112,9 +112,9 @@ call.on('data', (response: any) => {
       let poolAddress = 'N/A';
       let tokenA = 'N/A';
       let tokenB = 'N/A';
-      let atob : boolean = false;
-      let amount_in : string = '';
-      let amount_out : string = '';
+      let atob: boolean = false;
+      let amount_in: string = '';
+      let amount_out: string = '';
 
       if (event.contents && event.contents.value) {
         try {
