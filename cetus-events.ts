@@ -5,224 +5,248 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-
-// Quicknode endpoints consist of two crucial components: the endpoint name and the corresponding token
-// For eg: QN Endpoint: https://docs-demo.sui-mainnet.quiknode.pro/abcde123456789
-// endpoint will be: docs-demo.sui-mainnet.quiknode.pro:9000  {9000 is the port number for Sui gRPC}
-// token will be : abcde123456789
-const ENDPOINT: string = process.env.ENDPOINT || "";
-const TOKEN: string = process.env.TOKEN || "";
-
 // Configuration
 const PROTO_PATH = path.join(__dirname, 'protos/sui/rpc/v2/subscription_service.proto');
-
-
-
-// The Cetus Swap Event from Aggregator mode
 const CETUS_SWAP_EVENT_TYPE = '0xeffc8ae61f439bb34c9b905ff8f29ec56873dcedf81c7123ff2f1f67c45ec302::cetus::CetusSwapEvent';
+const SUI_TYPE = '0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
+const MIN_SUI_AMOUNT = BigInt(10) * BigInt(1_000_000_000); // 50 SUI
 
-// Load protobuf definitions
-const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
-  keepCase: true,
-  longs: String,
-  enums: String,
-  defaults: true,
-  oneofs: true,
-  includeDirs: [path.join(__dirname, 'protos')],
-});
+export interface CetusSwapEvent {
+  checkpoint: string;
+  transactionDigest: string;
+  poolAddress: string;
+  tokenA: string;
+  tokenB: string;
+  atob: boolean;
+  amountIn: string;
+  amountOut: string;
+  timestamp?: string;
+  sender: string;
+}
 
-const proto = grpc.loadPackageDefinition(packageDefinition) as any;
-const SubscriptionService = proto.sui.rpc.v2.SubscriptionService;
+export class CetusEventSubscriber {
+  private client: any;
+  private endpoint: string;
+  private token: string;
+  private stream: any;
 
-// Create secure client
-const client = new SubscriptionService(ENDPOINT, grpc.credentials.createSsl());
-
-// Add token metadata
-const metadata = new grpc.Metadata();
-metadata.add('x-token', TOKEN);
-
-// Request payload - we need to request transactions and their events
-// Note: Paths are relative to Checkpoint message (nested inside response)
-const request = {
-  read_mask: {
-    paths: [
-      'sequence_number',
-      'digest',
-      'summary',
-      'summary.timestamp_ms',
-      'transactions',
-      'transactions.digest',
-      'transactions.events',
-      'transactions.events.events',
-    ],
-  },
-};
-
-const call = client.SubscribeCheckpoints(request, metadata);
-
-let eventCount = 0;
-let checkpointCount = 0;
-let transactionCount = 0;
-let totalEventsCount = 0;
-const uniqueEventTypes = new Set<string>();
-
-call.on('data', (response: any) => {
-  checkpointCount++;
-
-  const checkpoint = response.checkpoint;
-
-  if (!checkpoint) {
-    console.log(`[DEBUG] Checkpoint ${checkpointCount}: No checkpoint data`);
-    return;
+  constructor(endpoint: string, token: string) {
+    this.endpoint = endpoint;
+    this.token = token;
+    this.initializeClient();
   }
 
-  if (!checkpoint.transactions || checkpoint.transactions.length === 0) {
-    console.log(`[DEBUG] Checkpoint ${checkpoint.sequence_number}: No transactions`);
-    return;
+  private initializeClient() {
+    const packageDefinition = protoLoader.loadSync(PROTO_PATH, {
+      keepCase: true,
+      longs: String,
+      enums: String,
+      defaults: true,
+      oneofs: true,
+      includeDirs: [path.join(__dirname, 'protos')],
+    });
+
+    const proto = grpc.loadPackageDefinition(packageDefinition) as any;
+    const SubscriptionService = proto.sui.rpc.v2.SubscriptionService;
+
+    this.client = new SubscriptionService(this.endpoint, grpc.credentials.createSsl());
   }
-  //console.log(checkpoint.transactions);
-  console.log("Number of txs in checkpoint: ", checkpoint.transactions.length);
 
-  // Process each transaction in the checkpoint
-  for (const tx of checkpoint.transactions) {
-    transactionCount++;
+  public subscribe(callback: (event: CetusSwapEvent) => void) {
+    const metadata = new grpc.Metadata();
+    metadata.add('x-token', this.token);
 
-    if (!tx.events || !tx.events.events) {
-      continue;
-    }
+    const request = {
+      read_mask: {
+        paths: [
+          'sequence_number',
+          'digest',
+          'summary',
+          'summary.timestamp_ms',
+          'transactions',
+          'transactions.digest',
+          'transactions.events',
+          'transactions.events.events',
+        ],
+      },
+    };
 
-    // Log all event types we see
-    for (const event of tx.events.events) {
-      totalEventsCount++;
-      if (event.event_type) {
-        uniqueEventTypes.add(event.event_type);
+    console.log('🔍 Subscribing to Cetus Swap Events...');
+    console.log(`Event Type: ${CETUS_SWAP_EVENT_TYPE}`);
+
+    this.stream = this.client.SubscribeCheckpoints(request, metadata);
+
+    let eventCount = 0;
+    let checkpointCount = 0;
+    let transactionCount = 0;
+    let totalEventsCount = 0;
+    const uniqueEventTypes = new Set<string>();
+
+    this.stream.on('data', (response: any) => {
+      checkpointCount++;
+      const checkpoint = response.checkpoint;
+
+      if (!checkpoint || !checkpoint.transactions || checkpoint.transactions.length === 0) {
+        return;
       }
-    }
 
-    // Filter for Cetus Swap Events
-    const cetusSwapEvents = tx.events.events.filter(
-      (event: any) => event.event_type === CETUS_SWAP_EVENT_TYPE
-    );
+      // Process each transaction in the checkpoint
+      for (const tx of checkpoint.transactions) {
+        transactionCount++;
 
-    // Display each Cetus Swap Event
-    for (const event of cetusSwapEvents) {
-      eventCount++;
+        if (!tx.events || !tx.events.events) {
+          continue;
+        }
 
-      // Parse BCS data to extract pool address and token addresses
-      let poolAddress = 'N/A';
-      let tokenA = 'N/A';
-      let tokenB = 'N/A';
-      let atob: boolean = false;
-      let amount_in: string = '';
-      let amount_out: string = '';
-
-      if (event.contents && event.contents.value) {
-        try {
-          const buffer = Buffer.from(event.contents.value);
-
-          // Debug: Log the full buffer to understand the structure
-          console.log(`[DEBUG] BCS Buffer length: ${buffer.length} bytes`);
-          console.log(`[DEBUG] Full buffer (hex): ${buffer.toString('hex')}`);
-
-          // Minimum buffer length check for fixed fields
-          if (buffer.length >= 82) {
-            // Bytes 0-32: pool (ID - 32 bytes)
-            poolAddress = '0x' + buffer.subarray(0, 32).toString('hex');
-
-            // Bytes 32-40: amount_in (u64 - 8 bytes)
-            // Bytes 40-48: amount_out (u64 - 8 bytes)
-            amount_in = buffer.readBigUInt64LE(32).toString();
-            amount_out = buffer.readBigUInt64LE(40).toString();
-
-            // Byte 48: a2b (bool - 1 byte)
-            atob = buffer.readUInt8(48) === 1;
-
-            // Bytes 49-82: by_amount_in (bool) + partner_id (ID) - skip these fields
-
-            // Bytes 82+: coin_a (TypeName - variable length, BCS encoded string)
-            // Bytes after coin_a: coin_b (TypeName - variable length, BCS encoded string)
-            // TypeName in BCS: length (ULEB128) + UTF8 bytes
-            let offset = 82;
-
-            // Read coin_a TypeName
-            const coinALength = buffer.readUInt8(offset);
-            offset += 1;
-            if (buffer.length >= offset + coinALength) {
-              tokenA = buffer.subarray(offset, offset + coinALength).toString('utf8');
-              offset += coinALength;
-
-              // Read coin_b TypeName
-              if (buffer.length > offset) {
-                const coinBLength = buffer.readUInt8(offset);
-                offset += 1;
-                if (buffer.length >= offset + coinBLength) {
-                  tokenB = buffer.subarray(offset, offset + coinBLength).toString('utf8');
-                }
-              }
-            }
+        // Log all event types we see
+        for (const event of tx.events.events) {
+          totalEventsCount++;
+          if (event.event_type) {
+            uniqueEventTypes.add(event.event_type);
           }
+        }
 
+        // Filter for Cetus Swap Events
+        const cetusSwapEvents = tx.events.events.filter(
+          (event: any) => event.event_type === CETUS_SWAP_EVENT_TYPE
+        );
 
-        } catch (e) {
-          console.error('Error parsing BCS:', e);
+        for (const event of cetusSwapEvents) {
+          const parsedEvent = this.parseEvent(event, checkpoint, tx);
+          if (parsedEvent) {
+            eventCount++;
+            callback(parsedEvent);
+          }
         }
       }
 
-      console.log('\n' + '='.repeat(80));
-      console.log(`🔄 CETUS SWAP EVENT #${eventCount}`);
-      console.log('='.repeat(80));
-      console.log(`Checkpoint:        ${checkpoint.sequence_number}`);
-      const timestamp = checkpoint.summary?.timestamp_ms || checkpoint.timestamp_ms;
-      if (timestamp) {
-        console.log(`Timestamp:         ${new Date(parseInt(timestamp)).toISOString()}`);
+      if (checkpointCount % 10 === 0) {
+        console.log(`\n[STATS] Checkpoints: ${checkpointCount} | Transactions: ${transactionCount} | Total Events: ${totalEventsCount} | Cetus Swaps: ${eventCount}`);
       }
-      console.log(`Transaction ID:    ${tx.digest}`);
-      console.log(`Sender:            ${event.sender}`);
-      console.log(`Event Type:        ${event.event_type}`);
-      console.log(`Pool Address:      ${poolAddress}`);
-      console.log(`Token A:           ${tokenA}`);
-      console.log(`Token B:           ${tokenB}`);
-      console.log(`Swap A to B:       ${atob}`);
-      console.log(`Amount in:         ${amount_in}`);
-      console.log(`Amount out:        ${amount_out}`);
-      console.log('='.repeat(80));
+    });
+
+    this.stream.on('error', (error: any) => {
+      console.error('Stream error:', error);
+    });
+
+    this.stream.on('end', () => {
+      console.log('\nStream ended');
+    });
+  }
+
+  public unsubscribe() {
+    if (this.stream) {
+      this.stream.cancel();
     }
   }
 
-  // Print periodic stats
-  if (checkpointCount % 10 === 0) {
-    console.log(`\n[STATS] Checkpoints: ${checkpointCount} | Transactions: ${transactionCount} | Total Events: ${totalEventsCount} | Cetus Swaps: ${eventCount}`);
-    console.log(`[STATS] Unique event types seen: ${uniqueEventTypes.size}`);
+  private parseEvent(event: any, checkpoint: any, tx: any): CetusSwapEvent | null {
+    let poolAddress = 'N/A';
+    let tokenA = 'N/A';
+    let tokenB = 'N/A';
+    let atob: boolean = false;
+    let amount_in: string = '';
+    let amount_out: string = '';
+
+    if (event.contents && event.contents.value) {
+      try {
+        const buffer = Buffer.from(event.contents.value);
+        if (buffer.length >= 82) {
+          poolAddress = '0x' + buffer.subarray(0, 32).toString('hex');
+          amount_in = buffer.readBigUInt64LE(32).toString();
+          amount_out = buffer.readBigUInt64LE(40).toString();
+          atob = buffer.readUInt8(48) === 1;
+
+          let offset = 82;
+          const coinALength = buffer.readUInt8(offset);
+          offset += 1;
+          if (buffer.length >= offset + coinALength) {
+            tokenA = buffer.subarray(offset, offset + coinALength).toString('utf8');
+            offset += coinALength;
+            if (buffer.length > offset) {
+              const coinBLength = buffer.readUInt8(offset);
+              offset += 1;
+              if (buffer.length >= offset + coinBLength) {
+                tokenB = buffer.subarray(offset, offset + coinBLength).toString('utf8');
+              }
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Error parsing BCS:', e);
+        return null;
+      }
+    }
+
+    // Filter: Only show SUI -> Token swaps with Amount > 50 SUI
+    let isSuiToToken = false;
+    let suiAmount = BigInt(0);
+
+    if (atob) {
+      if (tokenA === SUI_TYPE) {
+        isSuiToToken = true;
+        suiAmount = BigInt(amount_in);
+      }
+    } else {
+      if (tokenB === SUI_TYPE) {
+        isSuiToToken = true;
+        suiAmount = BigInt(amount_in);
+      }
+    }
+
+    if (!isSuiToToken || suiAmount <= MIN_SUI_AMOUNT) {
+      return null;
+    }
+
+    return {
+      checkpoint: checkpoint.sequence_number,
+      transactionDigest: tx.digest,
+      poolAddress,
+      tokenA,
+      tokenB,
+      atob,
+      amountIn: amount_in,
+      amountOut: amount_out,
+      timestamp: checkpoint.summary?.timestamp_ms || checkpoint.timestamp_ms,
+      sender: event.sender
+    };
   }
-});
+}
 
-call.on('error', (error: any) => {
-  console.error('Stream error:', error);
-});
+// Main execution block
+if (require.main === module) {
+  const ENDPOINT: string = process.env.ENDPOINT || "";
+  const TOKEN: string = process.env.TOKEN || "";
 
-call.on('end', () => {
-  console.log('\nStream ended');
-  console.log(`Total Cetus Swap Events received: ${eventCount}`);
-});
+  if (!ENDPOINT || !TOKEN) {
+    console.error("Missing ENDPOINT or TOKEN in environment variables");
+    process.exit(1);
+  }
 
-console.log('🔍 Subscribing to Cetus Swap Events...');
-console.log(`Event Type: ${CETUS_SWAP_EVENT_TYPE}`);
-console.log('Press Ctrl+C to stop.\n');
+  const subscriber = new CetusEventSubscriber(ENDPOINT, TOKEN);
 
-process.on('SIGINT', () => {
-  console.log(`\n\nClosing subscription...`);
-  console.log(`\n=== FINAL STATISTICS ===`);
-  console.log(`Checkpoints processed: ${checkpointCount}`);
-  console.log(`Transactions processed: ${transactionCount}`);
-  console.log(`Total events seen: ${totalEventsCount}`);
-  console.log(`Cetus Swap Events found: ${eventCount}`);
-  // console.log(`\nUnique event types seen (${uniqueEventTypes.size}):`);
-  // Array.from(uniqueEventTypes)
-  //   .sort()
-  //   .forEach((type) => {
-  //     const isCetus = type.includes('pool::SwapEvent') || type.includes('cetus');
-  //     console.log(`${isCetus ? '  👉 ' : '     '}${type}`);
-  //   });
-  call.cancel();
-  process.exit(0);
-});
+  subscriber.subscribe((event) => {
+    console.log('\n' + '='.repeat(80));
+    console.log(`🔄 CETUS SWAP EVENT`);
+    console.log('='.repeat(80));
+    console.log(`Checkpoint:        ${event.checkpoint}`);
+    if (event.timestamp) {
+      console.log(`Timestamp:         ${new Date(parseInt(event.timestamp)).toISOString()}`);
+    }
+    console.log(`Transaction ID:    ${event.transactionDigest}`);
+    console.log(`Sender:            ${event.sender}`);
+    console.log(`Pool Address:      ${event.poolAddress}`);
+    console.log(`Token A:           ${event.tokenA}`);
+    console.log(`Token B:           ${event.tokenB}`);
+    console.log(`Swap A to B:       ${event.atob}`);
+    console.log(`Amount in:         ${event.amountIn}`);
+    console.log(`Amount out:        ${event.amountOut}`);
+    console.log('='.repeat(80));
+  });
+
+  process.on('SIGINT', () => {
+    console.log(`\n\nClosing subscription...`);
+    subscriber.unsubscribe();
+    process.exit(0);
+  });
+}
