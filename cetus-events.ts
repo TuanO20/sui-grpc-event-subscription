@@ -8,8 +8,8 @@ dotenv.config();
 // Configuration
 const PROTO_PATH = path.join(__dirname, 'protos/sui/rpc/v2/subscription_service.proto');
 const CETUS_SWAP_EVENT_TYPE = '0xeffc8ae61f439bb34c9b905ff8f29ec56873dcedf81c7123ff2f1f67c45ec302::cetus::CetusSwapEvent';
+// const CETUS_CREATE_POOL_EVENT_TYPE = '0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::factory::CreatePoolEvent';
 const SUI_TYPE = '0000000000000000000000000000000000000000000000000000000000000002::sui::SUI';
-const MIN_SUI_AMOUNT = BigInt(10) * BigInt(1_000_000_000); // 50 SUI
 
 export interface CetusSwapEvent {
   checkpoint: string;
@@ -29,10 +29,12 @@ export class CetusEventSubscriber {
   private endpoint: string;
   private token: string;
   private stream: any;
+  private minSuiAmount: bigint;
 
-  constructor(endpoint: string, token: string) {
+  constructor(endpoint: string, token: string, minSuiAmount: bigint = BigInt(50) * BigInt(1_000_000_000)) {
     this.endpoint = endpoint;
     this.token = token;
+    this.minSuiAmount = minSuiAmount;
     this.initializeClient();
   }
 
@@ -73,6 +75,7 @@ export class CetusEventSubscriber {
 
     console.log('🔍 Subscribing to Cetus Swap Events...');
     console.log(`Event Type: ${CETUS_SWAP_EVENT_TYPE}`);
+    console.log(`Min SUI Amount: ${this.minSuiAmount.toString()}`);
 
     this.stream = this.client.SubscribeCheckpoints(request, metadata);
 
@@ -178,7 +181,7 @@ export class CetusEventSubscriber {
       }
     }
 
-    // Filter: Only show SUI -> Token swaps with Amount > 50 SUI
+    // Filter: Only show SUI -> Token swaps with Amount > minSuiAmount
     let isSuiToToken = false;
     let suiAmount = BigInt(0);
 
@@ -194,7 +197,7 @@ export class CetusEventSubscriber {
       }
     }
 
-    if (!isSuiToToken || suiAmount <= MIN_SUI_AMOUNT) {
+    if (!isSuiToToken || suiAmount <= this.minSuiAmount) {
       return null;
     }
 

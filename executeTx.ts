@@ -3,7 +3,7 @@ import { SuiClient } from '@mysten/sui/client';
 import { Transaction, Inputs } from '@mysten/sui/transactions';
 
 export interface SwapParams {
-    dexPackageId: string;
+    dexSwapFunction: string;
     globalConfig: string;
     poolId: string;
     poolInitialSharedVersion: string | number;
@@ -20,7 +20,7 @@ export interface SwapParams {
 
 export async function executeSwap(params: SwapParams) {
     const {
-        dexPackageId,
+        dexSwapFunction,
         globalConfig,
         poolId,
         poolInitialSharedVersion,
@@ -57,12 +57,12 @@ export async function executeSwap(params: SwapParams) {
 
     const gasPrice = await client.getReferenceGasPrice();
 
-    // Set gas price is double the reference one -> More priority
-    tx.setGasPrice(gasPrice * 2n);
+    // Set gas price is at least x5 the reference one -> To be more priority
+    tx.setGasPrice(gasPrice * 5n);
     tx.setGasBudget(gasBudget);
 
     const result = tx.moveCall({
-        target: `${dexPackageId}::router::swap`,
+        target: `${dexSwapFunction}`,
         typeArguments: [
             tokenAAddress,                          // T0 (Coin A)
             tokenBAddress                           // T1 (Coin B)
