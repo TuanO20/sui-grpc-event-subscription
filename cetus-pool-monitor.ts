@@ -111,11 +111,18 @@ export class CetusPoolSubscriber {
 
         this.stream.on('error', (error: any) => {
             console.error('Stream error:', error);
+            this.reconnect();
         });
 
         this.stream.on('end', () => {
             console.log('\nStream ended');
         });
+    }
+
+    private async reconnect() {
+        console.log('⚠️ Connection lost. Reconnecting in 5s...');
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        this.subscribe();
     }
 
     private async processEvent(event: any, checkpoint: any, tx: any) {
@@ -278,6 +285,11 @@ export class CetusPoolSubscriber {
 
     private async triggerSwap(poolId: string, tokenA: string, tokenB: string, a2b: boolean) {
         console.log('🚀 Triggering Auto-Buy...');
+
+        if (process.env.DRY_RUN === 'true') {
+            console.log('⚠️ [DRY RUN] Skipping actual swap execution.');
+            return;
+        }
 
         // We need the initial shared version of the pool.
         // Since it's a new pool, we might need to fetch it.

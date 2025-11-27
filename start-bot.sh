@@ -27,7 +27,7 @@ echo "🔧 Starting monitor process..." | tee -a "$LOG_FILE"
 
 # Run the monitor
 # We use npx tsx to run the typescript file directly
-npx tsx cetus-pool-monitor.ts >> "$LOG_FILE" 2>&1 &
+yarn tsx cetus-pool-monitor.ts >> "$LOG_FILE" 2>&1 &
 MONITOR_PID=$!
 
 echo "  ✓ Monitor started with PID $MONITOR_PID" | tee -a "$LOG_FILE"
