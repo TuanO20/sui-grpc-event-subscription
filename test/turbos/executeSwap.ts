@@ -9,6 +9,7 @@ export interface SwapParams {
     poolInitialSharedVersion: string | number;
     tokenAAddress: string;
     tokenBAddress: string;
+    feeType: string;
     a2b: boolean;
     amount: string | number | bigint;
     byAmountIn: boolean;
@@ -16,9 +17,12 @@ export interface SwapParams {
     keypair: Ed25519Keypair;
     client: SuiClient;
     gasBudget?: number | string | bigint;
+    threshold?: string | number | bigint;
+    recipient?: string;
+    deadline?: number;
 }
 
-export async function executeSwap(params: SwapParams) {
+export async function executeTurbosSwap(params: SwapParams) {
     const {
         dexSwapFunction,
         globalConfig,
@@ -26,13 +30,17 @@ export async function executeSwap(params: SwapParams) {
         poolInitialSharedVersion,
         tokenAAddress,
         tokenBAddress,
+        feeType,
         a2b,
         amount,
         byAmountIn,
         sqrtPriceLimit,
         keypair,
         client,
-        gasBudget = 100000000
+        gasBudget = 100000000,
+        threshold = 0,
+        recipient,
+        deadline
     } = params;
 
     const sender = keypair.toSuiAddress();
@@ -42,18 +50,39 @@ export async function executeSwap(params: SwapParams) {
     const tx = new Transaction();
     tx.setSender(sender);
 
-    // Create a zero coin for the output placeholder (Coin A if a2b is false, meaning we are swapping B -> A)
-    // Actually, the zero coin logic in the original script was:
-    // const zeroCoin = tx.moveCall({ target: '0x2::coin::zero', typeArguments: [USDC_TYPE] });
-    // where USDC_TYPE was Coin A.
-    // So we need a zero coin of type Token A.
+    // Determine input token type
+    const inputTokenType = a2b ? tokenAAddress : tokenBAddress;
+    const isSui = inputTokenType.includes('::sui::SUI');
 
-    const zeroCoin = tx.moveCall({
-        target: '0x2::coin::zero',
-        typeArguments: [tokenAAddress],
-    });
+    let swapCoin;
+    if (isSui) {
+        [swapCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(amount)]);
+    } else {
+        // Fetch coins of the input type
+        const coins = await client.getCoins({
+            owner: sender,
+            coinType: inputTokenType,
+        });
 
-    const [swapCoin] = tx.splitCoins(tx.gas, [tx.pure.u64(amount)]);
+        if (coins.data.length === 0) {
+            throw new Error(`No coins found for type ${inputTokenType}`);
+        }
+
+        // For simplicity, take the first coin. In production, you'd merge.
+        // If the first coin has enough balance, split it.
+        // If not, we'd need to merge. For this test, assuming the first coin (or merged) is enough.
+        // To be safe, let's merge all coins first if there are multiple.
+
+        let primaryCoin;
+        if (coins.data.length > 1) {
+            tx.mergeCoins(tx.object(coins.data[0].coinObjectId), coins.data.slice(1).map(c => tx.object(c.coinObjectId)));
+            primaryCoin = tx.object(coins.data[0].coinObjectId);
+        } else {
+            primaryCoin = tx.object(coins.data[0].coinObjectId);
+        }
+
+        [swapCoin] = tx.splitCoins(primaryCoin, [tx.pure.u64(amount)]);
+    }
 
     const gasPrice = await client.getReferenceGasPrice();
 
@@ -61,37 +90,56 @@ export async function executeSwap(params: SwapParams) {
     tx.setGasPrice(gasPrice * 5n);
     tx.setGasBudget(gasBudget);
 
+    // Determine function name and handle a2b logic
+    const targetFunction = a2b
+        ? dexSwapFunction
+        : dexSwapFunction.replace('swap_a_b', 'swap_b_a');
+
+    console.log(`Swapping ${a2b ? 'A -> B' : 'B -> A'} using function: ${targetFunction}`);
+
     const result = tx.moveCall({
-        target: `${dexSwapFunction}`,
+        target: `${targetFunction}`,
         typeArguments: [
             tokenAAddress,                          // T0 (Coin A)
-            tokenBAddress                           // T1 (Coin B)
+            tokenBAddress,                          // T1 (Coin B)
+            feeType                                 // T2 (Fee Tier)
         ],
         arguments: [
-            tx.object(globalConfig),           // arg0: GlobalConfig
             tx.object(Inputs.SharedObjectRef({
                 objectId: poolId,
                 initialSharedVersion: Number(poolInitialSharedVersion),
                 mutable: true,
-            })),                                // arg1: Pool
-            zeroCoin,                           // arg2: Coin<T0> (Zero)
-            swapCoin,                           // arg3: Coin<T1> (Input)
-            tx.pure.bool(a2b),                  // arg4: a2b
-            tx.pure.bool(byAmountIn),           // arg5: by_amount_in
-            tx.pure.u64(amount),                // arg6: amount
-            tx.pure.u128(sqrtPriceLimit),       // arg7: sqrt_price_limit
-            tx.pure.bool(false),                // arg8: swap_all
-            tx.object.clock()                   // arg9: Clock
+            })),                                // arg0: Pool
+            tx.makeMoveVec({ elements: [swapCoin] }), // arg1: vector<Coin<T0>> or vector<Coin<T1>>
+            tx.pure.u64(amount),                // arg2: amount_specified
+            tx.pure.u64(threshold),             // arg3: amount_threshold
+            tx.pure.u128(sqrtPriceLimit),       // arg4: sqrt_price_limit
+            tx.pure.bool(byAmountIn),           // arg5: is_exact_in
+            tx.pure.address(recipient || sender), // arg6: recipient
+            tx.pure.u64(deadline || Date.now() + 60000), // arg7: deadline
+            tx.object.clock(),                  // arg8: Clock
+            tx.object(globalConfig)             // arg9: Versioned
         ],
     });
-
-    // Transfer the returned coins back to sender
-    tx.transferObjects([result[0], result[1]], tx.pure.address(sender));
 
     // 2. Build & Sign & Execute (All in one via JSON-RPC)
     console.log('Executing transaction via JSON-RPC...');
 
     try {
+        // Dry run to check for errors
+        console.log('Dry running transaction...');
+        const dryRunResult = await client.devInspectTransactionBlock({
+            sender: sender,
+            transactionBlock: tx,
+        });
+
+        if (dryRunResult.effects.status.status === 'failure') {
+            console.error('❌ Dry run failed:', JSON.stringify(dryRunResult.effects.status, null, 2));
+            console.error('Dry run error:', dryRunResult.error);
+            throw new Error(`Dry run failed: ${dryRunResult.effects.status.error}`);
+        }
+        console.log('✅ Dry run successful!');
+
         const result = await client.signAndExecuteTransaction({
             signer: keypair,
             transaction: tx,
@@ -110,7 +158,8 @@ export async function executeSwap(params: SwapParams) {
             return result;
         } else {
             console.log('❌ Transaction execution failed!');
-            console.log('Status:', result.effects?.status?.status);
+            console.log('Status:', JSON.stringify(result.effects?.status, null, 2));
+            console.log('Effects:', JSON.stringify(result.effects, null, 2));
             throw new Error(`Transaction failed with status: ${result.effects?.status?.status}`);
         }
     } catch (error: any) {
